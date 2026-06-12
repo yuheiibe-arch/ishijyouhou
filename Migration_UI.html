@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: "Helvetica Neue", Arial, sans-serif; color: #333; padding: 15px; }
+      h3 { margin-top: 0; color: #444; border-bottom: 2px solid #4285f4; padding-bottom: 10px; }
+      .group { margin-bottom: 20px; }
+      label { display: block; margin-bottom: 8px; font-weight: bold; font-size: 14px; }
+      select, input[type="text"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-size: 14px; }
+      .radio-group label { display: inline-block; margin-right: 15px; font-weight: normal; cursor: pointer; }
+      .radio-group input { margin-right: 5px; }
+      
+      button {
+        width: 100%; padding: 12px; border: none; border-radius: 4px; 
+        background-color: #4285f4; color: white; font-size: 16px; font-weight: bold; cursor: pointer;
+        transition: background-color 0.2s;
+      }
+      button:hover { background-color: #357ae8; }
+      button:disabled { background-color: #ccc; cursor: not-allowed; }
+      
+      .note { font-size: 12px; color: #666; margin-top: 5px; }
+      #status { margin-top: 15px; color: #d32f2f; font-weight: bold; font-size: 13px; text-align: center; height: 20px; }
+    </style>
+  </head>
+  <body>
+    <h3>次年度移行シート作成</h3>
+
+    <div class="group">
+      <label>作成する年度</label>
+      <select id="yearSelect">
+        <option>読み込み中...</option>
+      </select>
+      <div class="note">※カレンダーソースから未来の年度を取得しています</div>
+    </div>
+
+    <div class="group">
+      <label>作成対象</label>
+      <div class="radio-group">
+        <label><input type="radio" name="target" value="all" checked> すべて</label>
+        <label><input type="radio" name="target" value="full"> 常勤のみ</label>
+        <label><input type="radio" name="target" value="part"> 定期非常勤のみ</label>
+      </div>
+    </div>
+
+    <button id="runBtn" onclick="runMigration()">作成開始</button>
+    <div id="status"></div>
+
+    <script>
+      // 初期化：年度リストの取得
+      window.onload = function() {
+        google.script.run
+          .withSuccessHandler(populateYears)
+          .withFailureHandler(showError)
+          .getAvailableYears();
+      };
+
+      function populateYears(years) {
+        const select = document.getElementById('yearSelect');
+        select.innerHTML = "";
+        if (years.length === 0) {
+          const opt = document.createElement('option');
+          opt.text = "選択可能な年度がありません";
+          select.add(opt);
+          document.getElementById('runBtn').disabled = true;
+          return;
+        }
+        
+        years.forEach(y => {
+          const opt = document.createElement('option');
+          opt.value = y;
+          opt.text = y;
+          select.add(opt);
+        });
+      }
+
+      function runMigration() {
+        const btn = document.getElementById('runBtn');
+        const status = document.getElementById('status');
+        const year = document.getElementById('yearSelect').value;
+        const radios = document.getElementsByName('target');
+        let target = 'all';
+        for (const r of radios) { if (r.checked) target = r.value; }
+
+        btn.disabled = true;
+        btn.textContent = "作成中...";
+        status.textContent = "処理には数分かかる場合があります";
+
+        google.script.run
+          .withSuccessHandler(onComplete)
+          .withFailureHandler(e => {
+            showError(e);
+            btn.disabled = false;
+            btn.textContent = "作成開始";
+          })
+          .executeMigration(year, target);
+      }
+
+      function onComplete(result) {
+        // 完了したらダイアログを閉じる（サーバー側で完了メッセージを出すため）
+        google.script.host.close();
+      }
+
+      function showError(e) {
+        document.getElementById('status').textContent = "エラー: " + e.message;
+      }
+    </script>
+  </body>
+</html>

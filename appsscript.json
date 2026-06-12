@@ -1,0 +1,18 @@
+{
+  "timeZone": "Asia/Tokyo",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "ShiftEditorLib",
+        "libraryId": "1gmA69S3bCQcN1AbRMJh0T4Wv0qFnq3-_HODNEXXERwbzcWTyMrmFAmHC",
+        "version": "17"
+      }
+    ]
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  }
+}
