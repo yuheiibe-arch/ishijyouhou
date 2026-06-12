@@ -62,8 +62,11 @@ function transferContractToMaster() {
   // ========================================================
   // 3. データの整形・正規化
   // ========================================================
-  const cleanKana = kanaRaw.replace(/[\s　\/／]/g, "").trim(); // 空白・スラッシュ完全除去
-  const kanriStatus = (kanriChoice.includes("管理") || kanriChoice.includes("有")) ? "管理" : "";
+  const cleanKana = kanaRaw.replace(/[\s \/／]/g, "").trim(); // 空白・スラッシュ完全除去
+  
+  // ★修正：管理医師は「常勤の場合のみ」判定するように条件（isJoukin）を追加
+  const kanriStatus = (isJoukin && (kanriChoice.includes("管理") || kanriChoice.includes("有") || kanriChoice.includes("はい"))) ? "管理" : "";
+  
   const bikouHolText = holChoice.includes("無") ? "勤務なし" : "勤務あり";
   const bikouNyText = nyChoice.includes("無") ? "勤務なし" : "勤務あり";
 
@@ -157,7 +160,7 @@ function transferContractToMaster() {
       totalHoursNum += hours;
 
       if (hasBreak) {
-        breakBikouLines.push(`${baseLine}　(休憩13:00～15:00)`);
+        breakBikouLines.push(`${baseLine} (休憩13:00～15:00)`);
       } else {
         breakBikouLines.push(baseLine);
       }
@@ -190,6 +193,7 @@ function transferContractToMaster() {
   mapData('jinjer番号', jinjerId);
   mapData('医師名', doctorName);
   mapData('シメイ', cleanKana);
+  mapData('フリガナ', cleanKana); // ★追加: マスタの列名が「フリガナ」だった場合の保険
   mapData('入職日', formattedStart);
   mapData('専門', specialty);
   mapData('主務', shumu);
