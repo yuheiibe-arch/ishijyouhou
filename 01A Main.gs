@@ -283,9 +283,17 @@ function saveShiftData(rowIndex, text, mode, sendPermission, sheetNameFromHtml) 
 
     if (!sheet) throw new Error(`シート「${sheetName}」が見つかりません。`);
 
+    // ★追加: セルの列番号を探す
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const targetColIdx = headers.findIndex(h => h.toString().trim() === "勤務備考" || h.toString().trim() === "提案シフト");
+
+    // ★追加: 上書き前の「古いテキスト」をシートから読み込み、スマート補正を実行！
+    if (targetColIdx > -1) {
+      const oldText = sheet.getRange(rowIndex, targetColIdx + 1).getValue();
+      text = smartAutoFixHolidayFooter(text, oldText);
+    }
+
     if (sheetName.includes("定期非常勤")) {
-      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-      const targetColIdx = headers.findIndex(h => h.toString().trim() === "勤務備考");
       if (targetColIdx === -1) throw new Error(`「${sheetName}」に「勤務備考」列が見つかりません。`);
       
       sheet.getRange(rowIndex, targetColIdx + 1).setValue(text);
@@ -317,9 +325,15 @@ function saveJokinWizardData(rowIndex, fullText, attributes) {
     const sheet = ss.getActiveSheet();
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     
-    // 勤務備考（シフト）の保存
+    // 勤務備考（シフト）の列番号を探す
     const shiftColIdx = headers.findIndex(h => h.toString().trim() === "勤務備考" || h.toString().trim() === "提案シフト");
     if (shiftColIdx === -1) throw new Error("「勤務備考」列が見つかりません。");
+
+    // ★追加: 上書き前の「古いテキスト」をシートから読み込み、スマート補正を実行！
+    const oldText = sheet.getRange(rowIndex, shiftColIdx + 1).getValue();
+    fullText = smartAutoFixHolidayFooter(fullText, oldText);
+
+    // 勤務備考（シフト）の保存
     sheet.getRange(rowIndex, shiftColIdx + 1).setValue(fullText);
 
     // 属性（祝日・年末年始）の保存
@@ -393,4 +407,66 @@ function autoRunScheduledBatch() {
   } catch(e) {
     console.error("❌ 自動実行中にエラーが発生しました: " + e.message);
   }
+}
+
+/**
+ * 【究極版】契約テキストの祝日・年末年始フッター補正関数
+ * シート上の「古いテキスト」から過去のルールを救出し、新しいテキストに合成する
+ */
+function smartAutoFixHolidayFooter(newText, oldText) {
+  if (!newText) return "";
+
+  // 1. スプレッドシート上の「古いテキスト」から、期間ごとのフッターを辞書化して救出
+  const oldFooters = {};
+  if (oldText) {
+    const oldBlocks = String(oldText).split(/(?=\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}～)/);
+    oldBlocks.forEach(b => {
+      const termMatch = b.match(/^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}～\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/);
+      const footerMatch = b.match(/（祝日：.+?[／/]\s*年末年始：.+?）/);
+      if (termMatch && footerMatch) {
+        oldFooters[termMatch[0]] = footerMatch[0]; // 例: "2026/04/01～2026/05/31" -> "（祝日：勤務あり...）"
+      }
+    });
+  }
+
+  // 2. エディタから来た「新しいテキスト」から、最新のフッターを抽出
+  const allNewFooters = newText.match(/（祝日：.+?[／/]\s*年末年始：.+?）/g);
+  let latestFooter = "";
+  if (allNewFooters && allNewFooters.length > 0) {
+    latestFooter = allNewFooters[allNewFooters.length - 1]; // 一番最後のフッターを「最新」とする
+  }
+
+  // 3. 新しいテキストを期間ブロックごとに分割し、フッターを再構築
+  const newBlocks = newText.split(/(?=\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}～)/);
+  
+  const fixedBlocks = newBlocks.map(block => {
+    let b = block.trim();
+    if (!b) return "";
+
+    const termMatch = b.match(/^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}～\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/);
+    const termKey = termMatch ? termMatch[0] : null;
+
+    const ownFooterMatch = b.match(/（祝日：.+?[／/]\s*年末年始：.+?）/);
+    const ownFooter = ownFooterMatch ? ownFooterMatch[0] : null;
+
+    // ブロック内のフッターを一旦綺麗に削除
+    b = b.replace(/[\r\n]*（祝日：.+?[／/]\s*年末年始：.+?）/g, "").trim();
+
+    // ★ フッターの適用優先順位 ★
+    // ① 自分自身がフッターを持っていればそれを使う
+    // ② 古いテキストに「同じ期間のフッター」があればそれを救出して使う（←これが期中変更の履歴を守る鍵！）
+    // ③ どちらも無ければ、最新のフッターを使う
+    let footerToApply = ownFooter;
+    if (!footerToApply && termKey && oldFooters[termKey]) {
+      footerToApply = oldFooters[termKey];
+    }
+    if (!footerToApply) {
+      footerToApply = latestFooter;
+    }
+
+    return footerToApply ? b + "\n" + footerToApply : b;
+  });
+
+  // ブロック同士を空行で繋ぎ直して返す
+  return fixedBlocks.filter(Boolean).join("\n\n");
 }
