@@ -11,6 +11,9 @@ function onOpen() {
     .addSeparator()
     .addItem('④ 契約内容を変更（エディタ起動）', 'launchContractEditor')
     .addSeparator()
+    // ▼ ここに追加 ▼
+    .addItem('⑤ 定期非常勤 契約一括更新', 'cu_showContractUpdater')
+    .addSeparator()
     .addItem('★ 外部シートから転記', 'openExternalImportDialog')
     .addItem('★ 勤怠シート一括作成（手動）', 'openManualGenerationDialog')
     .addSeparator()
@@ -18,6 +21,8 @@ function onOpen() {
         .addItem('次年度移行シート作成', 'openMigrationDialog'))
     .addToUi();
 }
+
+// ... 以降、既存の openDoctorViewForm などのコードがそのまま続きます ...
 
 function openDoctorViewForm() { openUrlDirectly('https://docs.google.com/forms/d/e/1FAIpQLSf2Gu90DPTzv06QwVHlOWnAHphyCaqhIRd_X64oIUs1lmG6hg/viewform?usp=dialog'); }
 function openDoctorEditForm() {

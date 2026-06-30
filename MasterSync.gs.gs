@@ -45,9 +45,16 @@ function syncAndExpandSchedule(headers, rowData, contractText, fiscalYear, contr
   // ★追加：医師免許取得日の動的取得
   const licenseDate = getValueByHeader(headers, rowData, "医師免許取得日") || getValueByHeader(headers, rowData, "医師免許取得");
 
-  // ★追加：jinjer番号とシメイの取得・整形
+  // ★修正：jinjer番号とシメイの取得・整形（完全動的取得）
   const jinjerId = getValueByHeader(headers, rowData, "jinjer番号") || "";
-  const kanaRaw = getValueByHeader(headers, rowData, "シメイ") || getValueByHeader(headers, rowData, "フリガナ") || getValueByHeader(headers, rowData, "カナ") || "";
+  
+  // フリガナ列を動的に探す（「緊急連絡先」などのトラップを回避する）
+  const kanaIdx = headers.findIndex(h => {
+    const title = String(h);
+    return (title.includes("フリガナ") || title.includes("シメイ") || title.includes("カナ")) 
+           && !title.includes("緊急") && !title.includes("連絡");
+  });
+  const kanaRaw = (kanaIdx > -1) ? rowData[kanaIdx] : "";
   const cleanKana = String(kanaRaw).replace(/[\s \/／]/g, "").trim();
   
   // 祝日・年末年始
@@ -93,23 +100,23 @@ function syncAndExpandSchedule(headers, rowData, contractText, fiscalYear, contr
   // 転記用データマップ（シートの列名と紐付け）
   const dataMap = {
     "医籍番号": medId,
-    "jinjer番号": jinjerId,         // ★追加
+    "jinjer番号": jinjerId,
     "医師名": name,
     "氏名": name,
-    "シメイ": cleanKana,            // ★追加
-    "フリガナ": cleanKana,          // ★追加: マスタの列名が「フリガナ」の場合の保険
+    "シメイ": cleanKana,
+    "フリガナ": cleanKana,
     "入職日": joinDate,
     "専門": specialty,      
     "専門科": specialty,    
-    "医師免許取得": licenseDate, // ★追加
-    "医師免許取得日": licenseDate, // ★追加
+    "医師免許取得": licenseDate,
+    "医師免許取得日": licenseDate,
     "主務": mainDuty,
-    "管理医師": kanriStatus,        // ★追加: 管理医師の転記
+    "管理医師": kanriStatus,
     "祝日": holidaySimple,      
     "年末年始": newYearSimple,  
     "週労働": weeklyHours,
     "勤務備考": contractText,   
-    "勤務備考（休憩あり）": contractWithBreakText, // ★追加
+    "勤務備考（休憩あり）": contractWithBreakText,
     "時給": wage,
     "契約時給": wage
   };
