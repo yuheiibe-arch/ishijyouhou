@@ -279,6 +279,21 @@ function launchEditorForSheet(sheetName) { return ShiftEditorLib.launchEditorFor
 function getDoctorList(sheetNameFromHtml) { return ShiftEditorLib.getDoctorList(sheetNameFromHtml || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getName()); }
 function getDoctorDataByRow(rowIndex, sheetNameFromHtml) { return ShiftEditorLib.getDoctorDataByRow(rowIndex, sheetNameFromHtml || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getName()); }
 
+// ★追加: 最後に確実に休憩あり列を上書き・同期させるための共通関数
+function syncBreakColumn(sheet, rowIndex, targetText) {
+  try {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    // 全角半角の揺れに対応するため「休憩あり」が含まれている列を探す
+    const breakColIdx = headers.findIndex(h => h && h.toString().includes("休憩あり"));
+    if (breakColIdx > -1) {
+      const textWithBreak = generateTextWithBreak(targetText);
+      sheet.getRange(rowIndex, breakColIdx + 1).setValue(textWithBreak);
+    }
+  } catch (e) {
+    console.error("syncBreakColumn Error: " + e.message);
+  }
+}
+
 // ■ 常勤/非常勤 共通シフト保存（メイン用）
 function saveShiftData(rowIndex, text, mode, sendPermission, sheetNameFromHtml) {
   try {
@@ -288,25 +303,35 @@ function saveShiftData(rowIndex, text, mode, sendPermission, sheetNameFromHtml) 
 
     if (!sheet) throw new Error(`シート「${sheetName}」が見つかりません。`);
 
-    // ★追加: セルの列番号を探す
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const targetColIdx = headers.findIndex(h => h.toString().trim() === "勤務備考" || h.toString().trim() === "提案シフト");
+    // 勤務備考列を探す（休憩あり列は除外）
+    const targetColIdx = headers.findIndex(h => h && (h.toString().includes("勤務備考") || h.toString().includes("提案シフト")) && !h.toString().includes("休憩あり"));
 
-    // ★追加: 上書き前の「古いテキスト」をシートから読み込み、スマート補正を実行！
     if (targetColIdx > -1) {
       const oldText = sheet.getRange(rowIndex, targetColIdx + 1).getValue();
       text = smartAutoFixHolidayFooter(text, oldText);
     }
 
+    let resultMsg = "";
+
+    // ① まずは本線の保存処理を実行
     if (sheetName.includes("定期非常勤")) {
       if (targetColIdx === -1) throw new Error(`「${sheetName}」に「勤務備考」列が見つかりません。`);
-      
       sheet.getRange(rowIndex, targetColIdx + 1).setValue(text);
+      resultMsg = "定期非常勤：更新完了";
       ss.toast("定期非常勤：勤務備考を更新しました。"); 
-      return "定期非常勤：更新完了";
+    } else {
+      // ライブラリの保存処理（ここで他の列が上書きされる可能性がある）
+      resultMsg = ShiftEditorLib.saveShiftData(rowIndex, text, mode, sendPermission, sheetName);
     }
-    
-    return ShiftEditorLib.saveShiftData(rowIndex, text, mode, sendPermission, sheetName);
+
+    // ② 保存が終わった【最後】に、最新のテキストを取得し直して休憩あり列を強制上書き
+    if (targetColIdx > -1) {
+      const savedText = sheet.getRange(rowIndex, targetColIdx + 1).getValue();
+      syncBreakColumn(sheet, rowIndex, savedText || text);
+    }
+
+    return resultMsg;
   } catch (e) {
     console.error("saveShiftData Error: " + e.stack);
     throw new Error(e.message);
@@ -317,29 +342,36 @@ function saveShiftData(rowIndex, text, mode, sendPermission, sheetNameFromHtml) 
 function savePartTimeWizardData(rowIndex, shiftText, attributes) { 
   try {
     const sheetName = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getName();
-    return ShiftEditorLib.savePartTimeWizardData(rowIndex, shiftText, attributes, sheetName); 
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    const result = ShiftEditorLib.savePartTimeWizardData(rowIndex, shiftText, attributes, sheetName); 
+    
+    // ★追加: 最後に休憩列を上書き
+    syncBreakColumn(sheet, rowIndex, shiftText);
+    
+    return result;
   } catch (e) {
     throw new Error(e.message);
   }
 }
 
-// ■ 常勤ウィザード用（★これを追加しました！）
+// ■ 常勤ウィザード用
 function saveJokinWizardData(rowIndex, fullText, attributes) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getActiveSheet();
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     
-    // 勤務備考（シフト）の列番号を探す
-    const shiftColIdx = headers.findIndex(h => h.toString().trim() === "勤務備考" || h.toString().trim() === "提案シフト");
+    const shiftColIdx = headers.findIndex(h => h && (h.toString().trim() === "勤務備考" || h.toString().trim() === "提案シフト") && !h.toString().includes("休憩あり"));
     if (shiftColIdx === -1) throw new Error("「勤務備考」列が見つかりません。");
 
-    // ★追加: 上書き前の「古いテキスト」をシートから読み込み、スマート補正を実行！
     const oldText = sheet.getRange(rowIndex, shiftColIdx + 1).getValue();
     fullText = smartAutoFixHolidayFooter(fullText, oldText);
 
     // 勤務備考（シフト）の保存
     sheet.getRange(rowIndex, shiftColIdx + 1).setValue(fullText);
+
+    // ★追加: 最後に休憩列を上書き
+    syncBreakColumn(sheet, rowIndex, fullText);
 
     // 属性（祝日・年末年始）の保存
     if (attributes) {
@@ -349,7 +381,6 @@ function saveJokinWizardData(rowIndex, fullText, attributes) {
       if (yeIdx > -1) sheet.getRange(rowIndex, yeIdx + 1).setValue(attributes.yearend);
     }
     
-    // ステータスの更新（もしあれば）
     const statusIdx = headers.findIndex(h => h.toString().includes("対応状況") || h.toString().includes("内容修正"));
     if (statusIdx > -1) sheet.getRange(rowIndex, statusIdx + 1).setValue("修正済");
     
@@ -360,7 +391,7 @@ function saveJokinWizardData(rowIndex, fullText, attributes) {
   }
 }
 
-// ■ 常勤属性のみ保存用（★これも追加しました！）
+// ■ 常勤属性のみ保存用
 function saveJokinAttributes(rowIndex, attributes) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -474,4 +505,35 @@ function smartAutoFixHolidayFooter(newText, oldText) {
 
   // ブロック同士を空行で繋ぎ直して返す
   return fixedBlocks.filter(Boolean).join("\n\n");
+}
+
+// ==========================================
+// ★ 追加ヘルパー関数（休憩テキスト自動付与）
+// ==========================================
+/**
+ * 渡されたシフトテキストを解析し、13:00～15:00を跨ぐ場合に休憩表記を付与する関数
+ */
+function generateTextWithBreak(text) {
+  if (!text) return "";
+  const lines = text.split('\n');
+  
+  const newLines = lines.map(line => {
+    // 期間や見出し行、すでに休憩表記がある場合はそのまま返す
+    if (line.includes("(休憩13:00～15:00)")) return line;
+    
+    // 時間表記を探す (例: 09:00～21:00, 09:00-18:00)
+    const timeMatch = line.match(/(\d{1,2})[:：](\d{2})\s*[～\-]\s*(\d{1,2})[:：](\d{2})/);
+    if (timeMatch) {
+      const startH = parseInt(timeMatch[1], 10);
+      const endH = parseInt(timeMatch[3], 10);
+      
+      // 開始が13時以前、終了が15時以降なら休憩を付与
+      if (startH <= 13 && endH >= 15) {
+        return line + " (休憩13:00～15:00)";
+      }
+    }
+    return line;
+  });
+  
+  return newLines.join('\n');
 }
