@@ -113,7 +113,7 @@ function calculateNetWorkMinutesStrict(startH, startM, endH, endM) {
   if (end < start) end += 24 * 60;
   let duration = end - start;
   const breakStart = 13 * 60; 
-  const breakEnd = 15 * 60;    
+  const breakEnd = 15 * 60;   
   if (start <= breakStart && end >= breakEnd) duration -= 120;
   return duration;
 }
@@ -150,7 +150,7 @@ function formatDateJp(d) {
   return `${dt.getFullYear()}/${dt.getMonth()+1}/${dt.getDate()}`;
 }
 function formatDate(date) { return Utilities.formatDate(date, "JST", "yyyy/MM/dd"); }
-function checkDayContext(line, char) { return line.includes(`${char}曜`) || line.includes(`(${char})`) || line.includes(`${char}:`) || line.includes(`${char}　`) || line.includes(`${char} `); }
+function checkDayContext(line, char) { return line.includes(`${char}曜`) || line.includes(`(${char})`) || line.includes(`${char}:`) || line.includes(`${char} `) || line.includes(`${char} `); }
 function getNextNumber(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return 1;
@@ -183,9 +183,18 @@ function filterBlocksByYearAndEntry(blocks, entryDate, fyEnd) {
 function standardizeRemarksFormat(text) {
   if (!text) return "";
   let s = String(text);
-  s = s.replace(/　/g, " ");
-  s = s.replace(/(\d{1,2}[:：]\d{2})\s*[~~\-ｰ\u2010\u2011\u2013\u2014\u2212]\s*(\d{1,2}[:：]\d{2})/g, "$1～$2");
-  s = s.replace(/(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\s*[~~\-ｰ\u2010\u2011\u2013\u2014\u2212]\s*(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})/g, "$1～$2");
+
+  // ★全角数字を半角数字に変換（「第３」などをシステムが正しく読めるようにする）
+  s = s.replace(/[０-９]/g, function(ch) {
+    return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
+  });
+
+  s = s.replace(/ /g, " ");
+  
+  // ★波ダッシュ「〜」など、あらゆるハイフン・波線系をシステム基準の「～」に強制統一
+  s = s.replace(/(\d{1,2}[:：]\d{2})\s*[~〜\-ｰ\u2010\u2011\u2013\u2014\u2212]\s*(\d{1,2}[:：]\d{2})/g, "$1～$2");
+  s = s.replace(/(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\s*[~〜\-ｰ\u2010\u2011\u2013\u2014\u2212]\s*(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})/g, "$1～$2");
+  
   s = s.replace(/(曜日)\s+(\d)/g, "$1：$2");
   s = s.replace(/(曜日)(\d{1,2}[:：])/g, "$1：$2");
   return s;

@@ -46,7 +46,7 @@ function syncActualsToExceptions() {
     return str.padStart(5, ' ');
   };
 
-  const cleanStr = (str) => String(str).replace(/[\s　【】\u200B\n\r]/g, "").trim(); 
+  const cleanStr = (str) => String(str).replace(/[\s 【】\u200B\n\r]/g, "").trim(); 
 
   const exceptionHeaders = absenceSheet.getRange(1, 1, 1, absenceSheet.getLastColumn()).getValues()[0];
   const cLocIndex = exceptionHeaders.map(cleanStr).findIndex(h => /拠点|クリニック|勤務先|店舗/.test(h));
@@ -70,14 +70,14 @@ function syncActualsToExceptions() {
       if (!canonical) continue;
       dict[canonical] = canonical;
       for (let j = 1; j <= 4; j++) {
-        let variant = dataMap[i][j] ? String(dataMap[i][j]).replace(/[\s　]+/g, "") : "";
+        let variant = dataMap[i][j] ? String(dataMap[i][j]).replace(/[\s ]+/g, "") : "";
         if (variant) dict[variant] = canonical;
       }
     }
   } catch(e) { console.error("❌ マスタ辞書構築エラー: " + e.message); }
 
   const getDropdownFormalName = (rawCalendarLoc, deptName) => {
-    let cleanRaw = String(rawCalendarLoc).replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s　]+/g, "");
+    let cleanRaw = String(rawCalendarLoc).replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "");
     let canonicalLoc = dict[cleanRaw] || cleanRaw;
 
     if (canonicalLoc === "亀有" || canonicalLoc === "北葛西") {
@@ -88,7 +88,7 @@ function syncActualsToExceptions() {
     for (let i = 0; i < allowedValues.length; i++) {
       let dropVal = allowedValues[i];
       if (!dropVal) continue;
-      let cleanDrop = String(dropVal).replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s　]+/g, "");
+      let cleanDrop = String(dropVal).replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "");
       let dropCanonical = dict[cleanDrop] || cleanDrop;
       if (dropCanonical === canonicalLoc) return dropVal; 
     }
@@ -157,7 +157,7 @@ function syncActualsToExceptions() {
       let cellA = fullValues[i][0];
       
       // 値がない、または「見えないスペース・改行」を取り除いて完全にカラッポになったらストップ
-      if (cellA == null || String(cellA).replace(/[\s　\n\r]/g, "") === "") {
+      if (cellA == null || String(cellA).replace(/[\s \n\r]/g, "") === "") {
         originalSummaryStartRow = i;
         break;
       }
@@ -305,12 +305,15 @@ function syncActualsToExceptions() {
     let numRows = dataArray.length;
 
     const sheetHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => cleanStr(h));
-    const cDate = sheetHeaders.findIndex(h => /日付|勤務日/.test(h));
-    const cName = sheetHeaders.findIndex(h => /氏名|名前|医師名/.test(h));
-    const cStart = sheetHeaders.findIndex(h => /開始/.test(h));
-    const cEnd = sheetHeaders.findIndex(h => /終了/.test(h));
-    const cLoc = sheetHeaders.findIndex(h => /拠点|クリニック|勤務先|店舗/.test(h));
-    const cType = sheetHeaders.findIndex(h => /種別|タイプ|理由/.test(h));
+    
+    // ★修正1：シートの実際の見出しにマッチするように検索キーワードを大幅に拡張
+    const cDate = sheetHeaders.findIndex(h => /日付|勤務日|対象日|年月日|日時/.test(h));
+    const cName = sheetHeaders.findIndex(h => /氏名|名前|医師名|ドクター/.test(h));
+    const cMedId = sheetHeaders.findIndex(h => /医籍番号|ID|id/i.test(h)); // ★修正2：医籍番号の列指定を追加
+    const cStart = sheetHeaders.findIndex(h => /開始|出勤|入/.test(h));
+    const cEnd = sheetHeaders.findIndex(h => /終了|退勤|退|出/.test(h));
+    const cLoc = sheetHeaders.findIndex(h => /拠点|クリニック|勤務先|店舗|勤務地|場所/.test(h));
+    const cType = sheetHeaders.findIndex(h => /種別|タイプ|理由|事由|区分|休み/.test(h));
 
     const sourceRange = sheet.getRange(realLastRow, 1, 1, lastCol);
     const targetRange = sheet.getRange(startRow, 1, numRows, lastCol);
@@ -328,20 +331,24 @@ function syncActualsToExceptions() {
     }
     targetRange.setValues(values); 
 
-    let writeData = { date: [], name: [], start: [], end: [], loc: [], type: [] };
+    // ★修正3：書き込みデータの中に「医籍番号 (medId)」を確実に追加
+    let writeData = { date: [], name: [], medId: [], start: [], end: [], loc: [], type: [] };
 
     for (let i = 0; i < numRows; i++) {
       let rowObj = dataArray[i];
       writeData.date.push([rowObj.date]);
       writeData.name.push([rowObj.name]);
+      writeData.medId.push([rowObj.medId || ""]); // 医籍番号をセット
       writeData.start.push([rowObj.start ? `'${rowObj.start}` : ""]);
       writeData.end.push([rowObj.end ? `'${rowObj.end}` : ""]);
       writeData.loc.push([rowObj.loc]); 
       writeData.type.push([rowObj.type]);
     }
     
+    // ★修正4：各列にデータを流し込む（医籍番号の書き込み処理も追加）
     if (cDate > -1) sheet.getRange(startRow, cDate + 1, numRows, 1).setValues(writeData.date);
     if (cName > -1) sheet.getRange(startRow, cName + 1, numRows, 1).setValues(writeData.name);
+    if (cMedId > -1) sheet.getRange(startRow, cMedId + 1, numRows, 1).setValues(writeData.medId);
     if (cStart > -1) sheet.getRange(startRow, cStart + 1, numRows, 1).setValues(writeData.start);
     if (cEnd > -1) sheet.getRange(startRow, cEnd + 1, numRows, 1).setValues(writeData.end);
     if (cLoc > -1) sheet.getRange(startRow, cLoc + 1, numRows, 1).setValues(writeData.loc);
