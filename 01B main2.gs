@@ -95,8 +95,8 @@ function updateAttendanceActuals() {
     }
 
     const topHeaders = fullValues[0];
-    const cleanHeaders = topHeaders.map(h => String(h).replace(/[\s　]+/g, ""));
-    const idHeaders = fullValues[1].map(h => String(h).replace(/[\s　]+/g, ""));
+    const cleanHeaders = topHeaders.map(h => String(h).replace(/[\s ]+/g, ""));
+    const idHeaders = fullValues[1].map(h => String(h).replace(/[\s ]+/g, ""));
     const dateLimitRow = originalSummaryStartRow; 
     
     const calRange = sheet.getRange(3, 1, dateLimitRow - 2, lastCol);
@@ -132,11 +132,12 @@ function updateAttendanceActuals() {
         calBackgrounds[r][c] = null; 
 
         // ==========================================
-        // ★無限増殖防止（前回の「契約：」などをリセット）
+        // ★無限増殖防止（複数シフト対応版）
         // ==========================================
         if (currentVal.includes('契約：')) {
-          const match = currentVal.match(/契約：([^\n]+)/);
-          if (match) currentVal = match[1]; 
+          // 最初の改行で止めず、「確定：」の前まで全て取得するよう修正
+          const match = currentVal.match(/契約：([\s\S]*?)(?:\n確定：|$)/);
+          if (match) currentVal = match[1].trim(); 
         }
 
         let cleanLines = currentVal.split('\n').filter(line => !line.startsWith('→') && !line.includes('※振替') && !line.includes('半日有給') && !line.includes('有給') && !line.includes('欠勤') && !line.includes('移動依頼'));
