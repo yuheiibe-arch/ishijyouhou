@@ -3,8 +3,8 @@
 // ==========================================
 
 /**
- * 備考欄解析（完全版）
- * 日付、時間(MAX集計)、曜日を解析してブロック配列を返す
+ * 備考欄解析（最強パーサー統合版）
+ * 第○週や全角数字を完璧に読み取り、ブロック配列を返す
  */
 function parseRemarksRobust(text) {
   if (!text) return [];
@@ -12,14 +12,14 @@ function parseRemarksRobust(text) {
   const lines = text.split("\n");
   const blocks = [];
    
-  let currentBlock = { startDate: new Date("2025/04/01"), hours: [0,0,0,0,0,0,0], hasHours: false };
+  let currentBlock = { startDate: new Date("2025/04/01"), hours: [0,0,0,0,0,0,0], hasHours: false, weekRules: {} };
   let isDateFound = false;
 
   lines.forEach(line => {
     line = line.trim();
     if (!line) return;
 
-    // 日付検出 (2025/06/01, 2025年6月 etc)
+    // 1. 日付ブロックの検出
     let dateMatch = line.match(/(\d{4})[\/\.\-](\d{1,2})[\/\.\-](\d{1,2})/);
     if (!dateMatch) {
       const jpDateMatch = line.match(/(\d{4})\s*年\s*(\d{1,2})\s*月(?:\s*(\d{1,2})\s*日)?/);
@@ -34,12 +34,12 @@ function parseRemarksRobust(text) {
         blocks.push(currentBlock);
       }
       const newDate = new Date(`${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]}`);
-      currentBlock = { startDate: newDate, hours: [0,0,0,0,0,0,0], hasHours: false };
+      currentBlock = { startDate: newDate, hours: [0,0,0,0,0,0,0], hasHours: false, weekRules: {} };
       isDateFound = true;
       return; 
     }
 
-    // 時間検出 (18:00-21:00, 18-21時 etc)
+    // 2. 労働時間の計算（全角ハイフン・波ダッシュ対応）
     let startH, startM, endH, endM;
     let validTime = false;
     const timeRegexColon = /(\d{1,2})[:：](\d{2})\s*[～~〜\-\u2010\u2011\u2013\u2014\u2212\uFF0D]\s*(\d{1,2})[:：](\d{2})/;
@@ -61,31 +61,49 @@ function parseRemarksRobust(text) {
     
     if (!validTime) return;
 
-    const workMinutes = calculateNetWorkMinutesStrict(startH, startM, endH, endM);
+    let workMinutes = (endH * 60 + endM) - (startH * 60 + startM);
+    // 13:00〜15:00を跨いでいたら休憩を2時間引く
+    let sDecimal = startH + (startM / 60);
+    let eDecimal = endH + (endM / 60);
+    if (sDecimal <= 13 && eDecimal >= 15) {
+      workMinutes -= 120;
+    }
     const workHours = parseFloat((workMinutes / 60).toFixed(2));
     if (workHours <= 0) return;
 
-    // 曜日検出
-    const targetDays = [];
-    if (checkDayContext(line, "月")) targetDays.push(0);
-    if (checkDayContext(line, "火")) targetDays.push(1);
-    if (checkDayContext(line, "水")) targetDays.push(2);
-    if (checkDayContext(line, "木")) targetDays.push(3);
-    if (checkDayContext(line, "金")) targetDays.push(4);
-    if (checkDayContext(line, "土")) targetDays.push(5);
+    // 3. 曜日と「週指定」の最強抽出ロジック（全角数字対応）
+    let tWithoutLoc = line.replace(/【.*?】/, "");
+    let dowMatch = tWithoutLoc.match(/(月|火|水|木|金|土|日)曜?日?/);
+    
+    if (dowMatch) {
+      let dayOfWeek = dowMatch[1];
+      const dowMap = {"月":0, "火":1, "水":2, "木":3, "金":4, "土":5, "日":6};
+      let dayIndex = dowMap[dayOfWeek];
+      
+      let beforeDow = tWithoutLoc.split(dowMatch[0])[0];
+      let targetWeeks = [1, 2, 3, 4, 5]; // デフォルトは毎週
+      
+      if (!beforeDow.includes("毎週")) {
+        // 全角数字を半角に変換してから根こそぎ拾う
+        let normalized = beforeDow.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+        let digits = normalized.match(/\d/g);
+        if (digits) {
+          targetWeeks = digits.map(Number).filter(n => n >= 1 && n <= 5);
+        }
+      }
 
-    let sundayCheckLine = line.replace(/月曜日|火曜日|水曜日|木曜日|金曜日|土曜日/g, "").replace(/月曜|火曜|水曜|木曜|金曜|土曜/g, "");
-    if (checkDayContext(sundayCheckLine, "日")) targetDays.push(6);
-
-    // MAX集計
-    [...new Set(targetDays)].forEach(dayIndex => {
-      currentBlock.hours[dayIndex] = Math.max(currentBlock.hours[dayIndex], workHours);
-    });
-    currentBlock.hasHours = true;
+      // 「第○週」のルールをブロックに記憶させる
+      if (targetWeeks.length > 0) {
+        if (!currentBlock.weekRules[dayIndex]) currentBlock.weekRules[dayIndex] = new Set();
+        targetWeeks.forEach(w => currentBlock.weekRules[dayIndex].add(w));
+        currentBlock.hours[dayIndex] = Math.max(currentBlock.hours[dayIndex], workHours);
+        currentBlock.hasHours = true;
+      }
+    }
   });
    
   if (currentBlock.hasHours) blocks.push(currentBlock);
-  return blocks.filter(b => b.hasHours);
+  return blocks;
 }
 
 // 列検索
@@ -150,7 +168,12 @@ function formatDateJp(d) {
   return `${dt.getFullYear()}/${dt.getMonth()+1}/${dt.getDate()}`;
 }
 function formatDate(date) { return Utilities.formatDate(date, "JST", "yyyy/MM/dd"); }
-function checkDayContext(line, char) { return line.includes(`${char}曜`) || line.includes(`(${char})`) || line.includes(`${char}:`) || line.includes(`${char} `) || line.includes(`${char} `); }
+
+// ★使用しなくなったため無効化（エラー防止のため空関数として残す）
+function checkDayContext(line, char) { 
+  return false; 
+}
+
 function getNextNumber(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return 1;
@@ -237,7 +260,7 @@ function parseRemarksToTextBlocks(text) {
   return blocks;
 }
 
-// ★修正版：1日複数シフトの抽出対応
+// ★真の完全修正版：1日複数シフト＆「第○・第○」の読み落としを完全解決
 function getShiftForDay(date, shiftLines, isHoliday, hRule, isNewYear, nRule) {
   if (isHoliday) {
     if (hRule.match(/(無|なし|×|不可|勤務なし)/)) return "";
@@ -259,10 +282,15 @@ function getShiftForDay(date, shiftLines, isHoliday, hRule, isNewYear, nRule) {
     
     if (line.includes("毎週")) {
       isMatch = true;
-    } else if (line.match(/第[\d・･]+/)) {
-      const match = line.match(/第([\d・･]+)/);
-      if (match) {
-        const weeks = match[1].split(/[・･]/).map(Number); 
+    } else {
+      // ★ 最強パーサーと同じ「曜日より前にある数字を全部拾う」ロジックに完全統一！
+      let beforeDow = line.split(targetDayStr + "曜")[0];
+      // 全角数字が含まれていても半角に直す
+      let normalized = beforeDow.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+      let digits = normalized.match(/\d/g);
+      
+      if (digits) {
+        const weeks = digits.map(Number); 
         if (weeks.includes(weekNum)) isMatch = true;
       }
     }

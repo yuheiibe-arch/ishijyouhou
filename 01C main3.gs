@@ -1,6 +1,6 @@
 // ==========================================
 // 【本番用・完全統一版】実績データ（KING OF TIME等）と勤怠予定の同期
-// （✅ 医籍番号判定 ＋ 院外ブロック ＋ 辞書プルダウン ＋ 日付型トラップ回避 ＋ ★絶対ストッパー）
+// （✅ 医籍番号判定 ＋ 院外ブロック ＋ 辞書プルダウン ＋ 日付型トラップ回避 ＋ ARRAYFORMULA対応 ＋ 行追加 ＋ 強行書き込み ＋ 降順ソート ＋ 過去日非表示）
 // ==========================================
 
 function syncActualsToExceptions() {
@@ -39,6 +39,7 @@ function syncActualsToExceptions() {
     return;
   }
 
+  // ★時間フォーマットを元の正しい仕様に復元（半角スペース埋め）
   const padTime = (t) => {
     if (!t) return "";
     let str = String(t).trim();
@@ -101,9 +102,9 @@ function syncActualsToExceptions() {
     if (data.length < 2) return set;
 
     const headers = data[0].map(h => cleanStr(h));
-    const cDate = headers.findIndex(h => /日付|勤務日/.test(h));
-    const cMedId = headers.findIndex(h => /医籍番号/.test(h));
-    const cName = headers.findIndex(h => /氏名|名前|医師名/.test(h));
+    const cDate = headers.findIndex(h => /日付|勤務日|対象日|年月日|日時/.test(h));
+    const cMedId = headers.findIndex(h => /医籍番号|ID|id/i.test(h));
+    const cName = headers.findIndex(h => /氏名|名前|医師名|ドクター/.test(h));
 
     if (cDate === -1) return set; 
 
@@ -126,7 +127,6 @@ function syncActualsToExceptions() {
 
       let docName = cName > -1 ? cleanStr(data[i][cName]).replace(/先生$/, "") : "NO_NAME";
       
-      // 無限増殖バグを防ぐため、キーから「拠点」を削除
       set.add(`${dStr}_${medId}`);
       set.add(`${dStr}_NAME:${docName}`);
     }
@@ -151,18 +151,13 @@ function syncActualsToExceptions() {
     const fullValues = typeof getTrueData === 'function' ? getTrueData(sheet) : sheet.getDataRange().getValues();
     if (fullValues.length < 3) return; 
 
-    // ★修正箇所：見えないスペースや改行もすべて消し去り、本当に文字がない行でストップさせる最強のストッパー
     let originalSummaryStartRow = fullValues.length;
     for (let i = 2; i < fullValues.length; i++) {
       let cellA = fullValues[i][0];
-      
-      // 値がない、または「見えないスペース・改行」を取り除いて完全にカラッポになったらストップ
       if (cellA == null || String(cellA).replace(/[\s \n\r]/g, "") === "") {
         originalSummaryStartRow = i;
         break;
       }
-      
-      // ついでに「合計」や「年間」などの文字が出てもストップ（念のため）
       let strA = String(cellA);
       if (strA.includes("合計") || strA.includes("年間") || strA.includes("備考")) {
         originalSummaryStartRow = i;
@@ -184,7 +179,6 @@ function syncActualsToExceptions() {
     const topHeaders = fullValues[nameRowIdx].map(h => cleanStr(h));
     const idHeaders = fullValues[idRowIdx].map(h => cleanStr(h));
     
-    // カレンダー部分のみを安全に切り出し
     const calValues = fullValues.slice(Math.max(1, nameRowIdx, idRowIdx) + 1, originalSummaryStartRow);
 
     for (let r = 0; r < calValues.length; r++) {
@@ -304,20 +298,30 @@ function syncActualsToExceptions() {
     let startRow = realLastRow + 1;
     let numRows = dataArray.length;
 
+    // ★シートの行数が足りない場合は末尾に追加してクラッシュを防ぐ
+    let maxRows = sheet.getMaxRows();
+    if (startRow + numRows - 1 > maxRows) {
+      sheet.insertRowsAfter(maxRows, (startRow + numRows - 1) - maxRows + 2);
+    }
+
     const sheetHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => cleanStr(h));
     
-    // ★修正1：シートの実際の見出しにマッチするように検索キーワードを大幅に拡張
     const cDate = sheetHeaders.findIndex(h => /日付|勤務日|対象日|年月日|日時/.test(h));
     const cName = sheetHeaders.findIndex(h => /氏名|名前|医師名|ドクター/.test(h));
-    const cMedId = sheetHeaders.findIndex(h => /医籍番号|ID|id/i.test(h)); // ★修正2：医籍番号の列指定を追加
+    const cMedId = sheetHeaders.findIndex(h => /医籍番号|ID|id/i.test(h)); 
     const cStart = sheetHeaders.findIndex(h => /開始|出勤|入/.test(h));
-    const cEnd = sheetHeaders.findIndex(h => /終了|退勤|退|出/.test(h));
+    const cEnd = sheetHeaders.findIndex(h => /終了|退勤|退/.test(h));
     const cLoc = sheetHeaders.findIndex(h => /拠点|クリニック|勤務先|店舗|勤務地|場所/.test(h));
     const cType = sheetHeaders.findIndex(h => /種別|タイプ|理由|事由|区分|休み/.test(h));
 
     const sourceRange = sheet.getRange(realLastRow, 1, 1, lastCol);
     const targetRange = sheet.getRange(startRow, 1, numRows, lastCol);
     
+    // ★フォーマットと入力規則のコピー
+    sourceRange.copyTo(targetRange, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    sourceRange.copyTo(targetRange, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+    
+    // ★数式のコピーとARRAYFORMULAの保護
     sourceRange.copyTo(targetRange); 
     const formulas = targetRange.getFormulas();
     const values = targetRange.getValues();
@@ -325,37 +329,87 @@ function syncActualsToExceptions() {
       for (let c = 0; c < lastCol; c++) {
         if (formulas[r][c] === "") {
           if (values[r][c] === true || values[r][c] === false) values[r][c] = false;
-          else values[r][c] = "";
+          else values[r][c] = null; // 空文字ではなくnullを入れてARRAYFORMULAを貫通させる
         }
       }
     }
     targetRange.setValues(values); 
 
-    // ★修正3：書き込みデータの中に「医籍番号 (medId)」を確実に追加
-    let writeData = { date: [], name: [], medId: [], start: [], end: [], loc: [], type: [] };
+    let writeData = { date: [], name: [], start: [], end: [], loc: [], type: [] };
 
     for (let i = 0; i < numRows; i++) {
       let rowObj = dataArray[i];
       writeData.date.push([rowObj.date]);
       writeData.name.push([rowObj.name]);
-      writeData.medId.push([rowObj.medId || ""]); // 医籍番号をセット
-      writeData.start.push([rowObj.start ? `'${rowObj.start}` : ""]);
-      writeData.end.push([rowObj.end ? `'${rowObj.end}` : ""]);
-      writeData.loc.push([rowObj.loc]); 
-      writeData.type.push([rowObj.type]);
+      // ★時間にアポストロフィを復元し、プルダウン規則の型と完全一致させる
+      writeData.start.push([rowObj.start ? `'${rowObj.start}` : null]);
+      writeData.end.push([rowObj.end ? `'${rowObj.end}` : null]);
+      writeData.loc.push([rowObj.loc || null]); 
+      writeData.type.push([rowObj.type || null]);
     }
     
-    // ★修正4：各列にデータを流し込む（医籍番号の書き込み処理も追加）
-    if (cDate > -1) sheet.getRange(startRow, cDate + 1, numRows, 1).setValues(writeData.date);
-    if (cName > -1) sheet.getRange(startRow, cName + 1, numRows, 1).setValues(writeData.name);
-    if (cMedId > -1) sheet.getRange(startRow, cMedId + 1, numRows, 1).setValues(writeData.medId);
-    if (cStart > -1) sheet.getRange(startRow, cStart + 1, numRows, 1).setValues(writeData.start);
-    if (cEnd > -1) sheet.getRange(startRow, cEnd + 1, numRows, 1).setValues(writeData.end);
-    if (cLoc > -1) sheet.getRange(startRow, cLoc + 1, numRows, 1).setValues(writeData.loc);
-    if (cType > -1) sheet.getRange(startRow, cType + 1, numRows, 1).setValues(writeData.type);
+    const safeSetValues = (colIdx, dataArr) => {
+      if (colIdx > -1) {
+        const range = sheet.getRange(startRow, colIdx + 1, numRows, 1);
+        const rules = range.getDataValidations();
+        range.clearDataValidations(); // ドロップダウンを一時解除
+        range.setValues(dataArr);     // データ書き込み
+        try { range.setDataValidations(rules); } catch(e) {} // 復元
+      }
+    };
+
+    safeSetValues(cDate, writeData.date);
+    safeSetValues(cName, writeData.name);
+    // 医籍番号は書き込まない
+    safeSetValues(cStart, writeData.start);
+    safeSetValues(cEnd, writeData.end);
+    safeSetValues(cLoc, writeData.loc);
+    safeSetValues(cType, writeData.type);
 
     return numRows;
   }
+
+  // ★ソートと非表示を同時に行う統合関数
+  const sortAndHidePastDates = (sheet) => {
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow < 2) return;
+    
+    sheet.showRows(2, lastRow - 1);
+
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(cleanStr);
+    const dateCol = headers.findIndex(h => /日付|勤務日|対象日|年月日|日時/.test(h)) + 1;
+    
+    if (dateCol > 0) {
+      sheet.getRange(2, 1, lastRow - 1, lastCol).sort({ column: dateCol, ascending: false });
+      
+      const dateValues = sheet.getRange(2, dateCol, lastRow - 1, 1).getValues();
+      const todayDate = new Date();
+      todayDate.setHours(0, 0, 0, 0);
+      
+      for (let i = 0; i < dateValues.length; i++) {
+        const dVal = dateValues[i][0];
+        let rowDate = null;
+        
+        if (dVal instanceof Date) {
+          rowDate = new Date(dVal.getTime());
+        } else if (dVal) {
+          let strVal = String(dVal).replace(/[年月]/g, '/').replace(/日/g, '');
+          let d = new Date(strVal);
+          if (!isNaN(d.getTime())) {
+            rowDate = d;
+          }
+        }
+        
+        if (rowDate) {
+          rowDate.setHours(0, 0, 0, 0);
+          if (rowDate.getTime() < todayDate.getTime()) {
+            sheet.hideRows(i + 2);
+          }
+        }
+      }
+    }
+  };
 
   let isUpdated = false;
 
@@ -369,6 +423,12 @@ function syncActualsToExceptions() {
     let addedCount = appendDataWithFormat(subSheet, newSubData);
     console.log(`\n✅ 【振替勤務】に ${addedCount} 件追記しました。`);
     isUpdated = true;
+  }
+
+  if (isUpdated) {
+    sortAndHidePastDates(absenceSheet);
+    sortAndHidePastDates(subSheet);
+    console.log("✅ シートを降順にソートし、過去の日付を非表示にしました。");
   }
 
   let apiSentCount = 0;
