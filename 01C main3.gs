@@ -79,7 +79,9 @@ function syncActualsToExceptions() {
 
   const getDropdownFormalName = (rawCalendarLoc, deptName) => {
     let cleanRaw = String(rawCalendarLoc).replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "");
-    let canonicalLoc = dict[cleanRaw] || cleanRaw;
+    
+    // ★修正：クリニックNoが含まれる辞書(locMaster)も参照させるように変更
+    let canonicalLoc = dict[cleanRaw] || locMaster[cleanRaw] || cleanRaw;
 
     if (canonicalLoc === "亀有" || canonicalLoc === "北葛西") {
       let suffix = (deptName === "内科") ? "（内科）" : "（小児科）";
