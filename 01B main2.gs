@@ -1,6 +1,6 @@
 // ==========================================
 // 【機能分割A】カレンダー実績反映（色塗り＆契約・確定併記）
-// ※ 無限増殖防止ロジック搭載
+// ※ 完全動的列検索・過去確定データ保護ロック・アーカイブ自動修復搭載
 // ==========================================
 
 const EXCEPTION_SS_ID = "10yPdoOOgqSSGKwoiPAXi83YM9vb_Em8r6Ex-bLfg28M"; 
@@ -25,6 +25,48 @@ const SHIFT_REGEX = /【(.*?)】(\d{1,2})[:]?(\d{0,2})\s*[-~～]\s*(\d{1,2})[:]?
 const DATE_REGEX = /(\d{4})[\/年](\d{1,2})[\/月](\d{1,2})/;
 const TIME_REGEX = /(\d{1,2}):(\d{2})/;
 
+/**
+ * 勤怠シートの見出し行・日付列・医師開始列・カレンダー終了行をすべて動的に特定するヘルパー
+ */
+function detectAttendanceSheetStructure(fullValues) {
+  let dateColIdx = 0;
+  let calHeaderRowIdx = 1;
+
+  for (let r = 0; r < Math.min(5, fullValues.length); r++) {
+    const idx = fullValues[r].findIndex(cell => String(cell).trim() === "日付");
+    if (idx !== -1) {
+      calHeaderRowIdx = r;
+      dateColIdx = idx;
+      break;
+    }
+  }
+
+  const docRowIdx = calHeaderRowIdx > 0 ? calHeaderRowIdx - 1 : 0;
+  const idRowIdx = calHeaderRowIdx;
+  const calStartRowIdx = Math.max(docRowIdx, idRowIdx) + 1;
+
+  let firstDocColIdx = dateColIdx + 1;
+  for (let c = dateColIdx + 1; c < fullValues[idRowIdx].length; c++) {
+    const hVal = String(fullValues[idRowIdx][c] || "").trim();
+    const docVal = String(fullValues[docRowIdx][c] || "").trim();
+    const normId = typeof normalizeMedId === "function" ? normalizeMedId(hVal) : hVal;
+    if (docVal !== "" || (/^\d+$/.test(normId) && !/曜日|判定|備考/.test(hVal))) {
+      firstDocColIdx = c;
+      break;
+    }
+  }
+
+  let calendarEndRowIdx = fullValues.length;
+  for (let r = calStartRowIdx; r < fullValues.length; r++) {
+    if (!(fullValues[r][dateColIdx] instanceof Date)) {
+      calendarEndRowIdx = r;
+      break;
+    }
+  }
+
+  return { docRowIdx, idRowIdx, calStartRowIdx, dateColIdx, firstDocColIdx, calendarEndRowIdx };
+}
+
 function updateAttendanceActuals() {
   const activeSs = SpreadsheetApp.getActiveSpreadsheet();
   let targetSs = activeSs;
@@ -33,15 +75,6 @@ function updateAttendanceActuals() {
     try { targetSs = SpreadsheetApp.openById(ATTENDANCE_SS_ID); } 
     catch (e) { console.error("勤怠ファイルの読み込みエラー: " + e.message); return; }
   }
-
-  console.log("=== [色塗り処理] 外部データの読み込み開始 ===");
-  const locMaster = fetchLocationMaster();
-  const closedData = fetchExternalClosedDays();
-  const actualShifts = fetchActualShifts(locMaster);
-  
-  const exceptionSs = SpreadsheetApp.openById(EXCEPTION_SS_ID);
-  const absenceData = fetchAbsenceData(exceptionSs);
-  const subData = fetchSubstitutionData(exceptionSs);
 
   const allTargetSheets = targetSs.getSheets().filter(sheet => sheet.getName().match(/^(常勤|定期非常勤)勤怠\d{4}(年度)?$/));
   let latestFullTime = null;
@@ -70,51 +103,96 @@ function updateAttendanceActuals() {
 
   if (targetSheets.length === 0) return;
 
+  console.log("=== [色塗り処理] 外部データの読み込み開始 ===");
+  const locMaster = fetchLocationMaster();
+  const closedData = fetchExternalClosedDays();
+
+  // まず現行の「確定シフト」を読み込み、その最小日付（例: 2026/10/01）を確認
+  let actualShifts = fetchActualShifts(locMaster);
+  const minActiveShiftDate = actualShifts.minDate || "9999/99/99";
+
+  // 対象シートの過去日（minActiveShiftDate より前）に「確定：未登録」等で壊れている月があるか事前スキャン
+  // ※また、勤怠シート一括作成の直後（まだ一度も実績集計区切りが作られていない状態）も過去月アーカイブを読み込む
+  const neededArchiveMonths = new Set();
   targetSheets.forEach(sheet => {
-    console.log(`\n処理中: ${sheet.getName()}`);
-    
-    const lastCol = sheet.getLastColumn();
-    const fullValues = getTrueData(sheet);
-    
-    let originalSummaryStartRow = -1;
-    let annualIdx = fullValues.findIndex(row => String(row[0]).includes("年間労働時間"));
-    if (annualIdx !== -1) {
-      originalSummaryStartRow = annualIdx - 12; 
-    } else {
-      for (let i = 2; i < fullValues.length; i++) {
-        if (String(fullValues[i][0]).match(/\d{4}年\d{1,2}月/) || String(fullValues[i][0]).includes("年間")) {
-          originalSummaryStartRow = i; break;
+    const vals = getTrueData(sheet);
+    const hasExistingActualSummary = vals.some(row => row.some(cell => String(cell).trim() === "実績集計区切り"));
+    const st = detectAttendanceSheetStructure(vals);
+
+    for (let r = st.calStartRowIdx; r < st.calendarEndRowIdx; r++) {
+      const dCell = vals[r][st.dateColIdx];
+      if (!(dCell instanceof Date)) continue;
+      const dKey = Utilities.formatDate(dCell, "JST", "yyyy/MM/dd");
+      if (dKey >= minActiveShiftDate) continue;
+
+      const ym = dKey.substring(0, 7); // "2026/04"
+      if (!hasExistingActualSummary) {
+        neededArchiveMonths.add(ym);
+      } else {
+        for (let c = st.firstDocColIdx; c < vals[r].length; c++) {
+          if (String(vals[r][c] || "").includes("確定：未登録")) {
+            neededArchiveMonths.add(ym);
+            break;
+          }
         }
       }
     }
-    if (originalSummaryStartRow === -1) return;
+  });
 
-    let newSummaryStartRow = fullValues.findIndex(row => String(row[0]) === "実績集計区切り");
-    if (newSummaryStartRow !== -1) {
-      sheet.deleteRows(newSummaryStartRow + 1, sheet.getLastRow() - newSummaryStartRow);
+  // 修復・初期照合が必要な過去月があれば、アーカイブスプシから該当月だけ追加読込
+  if (neededArchiveMonths.size > 0) {
+    console.log(`📦 過去月の復元・初期照合のためアーカイブシートを読み込みます: ${Array.from(neededArchiveMonths).sort().join(", ")}`);
+    actualShifts = fetchActualShifts(locMaster, neededArchiveMonths);
+  } else {
+    console.log(`🛡️ 過去月(${minActiveShiftDate}より前)はすべて確定済みのため保護ロックを適用します（アーカイブ読込不要）。`);
+  }
+
+  const exceptionSs = SpreadsheetApp.openById(EXCEPTION_SS_ID);
+  const absenceData = fetchAbsenceData(exceptionSs);
+  const subData = fetchSubstitutionData(exceptionSs);
+
+  targetSheets.forEach(sheet => {
+    console.log(`\n処理中: ${sheet.getName()}`);
+    
+    // ① 過去の「実績集計区切り」以降があれば先に削除してから正確なデータを取得する
+    const preValues = getTrueData(sheet);
+    const oldSepIdx = preValues.findIndex(row => row.some(cell => String(cell).trim() === "実績集計区切り"));
+    if (oldSepIdx !== -1) {
+      sheet.deleteRows(oldSepIdx + 1, sheet.getLastRow() - oldSepIdx);
     }
 
-    const topHeaders = fullValues[0];
-    const cleanHeaders = topHeaders.map(h => String(h).replace(/[\s ]+/g, ""));
-    const idHeaders = fullValues[1].map(h => String(h).replace(/[\s ]+/g, ""));
-    const dateLimitRow = originalSummaryStartRow; 
+    const lastCol = sheet.getLastColumn();
+    const fullValues = getTrueData(sheet);
+    const st = detectAttendanceSheetStructure(fullValues);
+    const { docRowIdx, idRowIdx, calStartRowIdx, dateColIdx, firstDocColIdx, calendarEndRowIdx } = st;
+
+    if (calendarEndRowIdx <= calStartRowIdx) return;
+
+    const topHeaders = fullValues[docRowIdx];
+    const cleanHeaders = topHeaders.map(h => String(h || "").replace(/[\s ]+/g, ""));
+    const idHeaders = fullValues[idRowIdx].map(h => typeof normalizeMedId === "function" ? normalizeMedId(h) : String(h || "").replace(/[\s ]+/g, ""));
     
-    const calRange = sheet.getRange(3, 1, dateLimitRow - 2, lastCol);
+    const calRowCount = calendarEndRowIdx - calStartRowIdx;
+    const calRange = sheet.getRange(calStartRowIdx + 1, 1, calRowCount, lastCol);
     const calValues = calRange.getValues();
     const calBackgrounds = calRange.getBackgrounds();
     
     const summaryDiffs = {};
 
     for (let r = 0; r < calValues.length; r++) {
-      const dateCell = calValues[r][0];
+      const dateCell = calValues[r][dateColIdx];
       if (!(dateCell instanceof Date)) continue;
       
       const dateKey = Utilities.formatDate(dateCell, "JST", "yyyy/MM/dd");
       const monthKey = `${dateCell.getFullYear()}年${dateCell.getMonth() + 1}月`;
+      const ymKey = dateKey.substring(0, 7);
       const isClosedDay = closedData.has(dateKey);
       const closedLocations = isClosedDay ? closedData.get(dateKey) : [];
 
-      for (let c = 1; c < lastCol; c++) {
+      // ★過去月の保護判定：現行確定シフトより前の日付で、かつアーカイブ再読込対象ではない確定済み月か？
+      const isProtectedPastMonth = (dateKey < minActiveShiftDate) && !neededArchiveMonths.has(ymKey);
+
+      for (let c = firstDocColIdx; c < lastCol; c++) {
         const docNameClean = cleanHeaders[c];
         const docMedId = idHeaders[c]; 
         
@@ -127,15 +205,56 @@ function updateAttendanceActuals() {
           summaryDiffs[docNameClean].months[monthKey] = { absH: 0, absD: 0, subH: 0, subD: 0, dates: [] };
         }
 
-        const compositeKey = `${dateKey}_${docMedId}`;
-        let currentVal = String(calValues[r][c] || "");
-        calBackgrounds[r][c] = null; 
+        const existingCellStr = String(calValues[r][c] || "");
 
-        // ==========================================
-        // ★無限増殖防止（複数シフト対応版）
-        // ==========================================
+        // =========================================================================
+        // 🛡️ 【過去確定セルの保護ロック】
+        // 既に確定している過去月（かつ「確定：未登録」ではないセル）は一切書き換えず、
+        // セル内の確定表記（またはお休み・振替情報）から集計値だけをカウントして次へ進む
+        // =========================================================================
+        if (isProtectedPastMonth && !existingCellStr.includes("確定：未登録")) {
+          let baseShiftStr = existingCellStr;
+          if (baseShiftStr.includes("契約：")) {
+            const m = baseShiftStr.match(/契約：([\s\S]*?)(?:\n確定：|$)/);
+            if (m) baseShiftStr = m[1].trim();
+          }
+          const baseClean = baseShiftStr.split('\n').filter(line => !line.startsWith('→') && !line.includes('※振替') && !line.includes('半日有給') && !line.includes('有給') && !line.includes('欠勤') && !line.includes('移動依頼')).join('\n');
+          const plannedForCalc = (!baseClean || baseClean === "休" || baseClean === "-") ? [] : extractPlannedShifts(baseClean);
+
+          if (existingCellStr.includes("※振替")) {
+            const subInfo = subData.get(`${dateKey}_${docMedId}`);
+            const subH = subInfo ? subInfo.hours : calculatePlannedHours(extractPlannedShifts(existingCellStr));
+            summaryDiffs[docNameClean].months[monthKey].subH += subH;
+            summaryDiffs[docNameClean].months[monthKey].subD += 1;
+            summaryDiffs[docNameClean].annual.subH += subH;
+            summaryDiffs[docNameClean].annual.subD += 1;
+          } else if (existingCellStr.includes("→欠勤") || existingCellStr.includes("欠勤")) {
+            const deductedHours = calculatePlannedHours(plannedForCalc);
+            summaryDiffs[docNameClean].months[monthKey].absH += deductedHours;
+            summaryDiffs[docNameClean].months[monthKey].absD += 1;
+            summaryDiffs[docNameClean].months[monthKey].dates.push(`${dateCell.getMonth() + 1}/${dateCell.getDate()}`);
+            summaryDiffs[docNameClean].annual.absH += deductedHours;
+            summaryDiffs[docNameClean].annual.absD += 1;
+          } else if (existingCellStr.includes("→半日有給")) {
+            summaryDiffs[docNameClean].annual.paid += 0.5;
+          } else if (existingCellStr.includes("→有給") || existingCellStr.includes("有給") || existingCellStr.includes("有休")) {
+            summaryDiffs[docNameClean].annual.paid += 1.0;
+          }
+          continue; // セルの文字・背景色は一切変更しない
+        }
+
+        // =========================================================================
+        // 🔄 通常の照合・更新処理（当月以降 または アーカイブからの修復対象月）
+        // =========================================================================
+        const compositeKey = `${dateKey}_${docMedId}`;
+        let currentVal = existingCellStr;
+
+        // 期間外（#d9d9d9）や休日（#f3f3f3）の背景色を維持しつつ、前回の赤・黄・青をリセット
+        if (calBackgrounds[r][c] !== "#d9d9d9") {
+          calBackgrounds[r][c] = (currentVal === "休") ? "#f3f3f3" : null;
+        }
+
         if (currentVal.includes('契約：')) {
-          // 最初の改行で止めず、「確定：」の前まで全て取得するよう修正
           const match = currentVal.match(/契約：([\s\S]*?)(?:\n確定：|$)/);
           if (match) currentVal = match[1].trim(); 
         }
@@ -162,7 +281,7 @@ function updateAttendanceActuals() {
         );
 
         if (absenceData.has(compositeKey)) {
-          const absenceType = absenceData.get(compositeKey);
+          const absenceType = String(absenceData.get(compositeKey));
           if (absenceType.includes("欠勤")) {
             appendText += `\n→${absenceType}`;
             hasException = true;
@@ -297,11 +416,11 @@ function updateAttendanceActuals() {
 
     console.log(`-> カレンダー更新完了。新・集計表を作成します...`);
 
-    const origSummaryRange = sheet.getRange(originalSummaryStartRow + 1, 1, sheet.getLastRow() - originalSummaryStartRow, lastCol);
-    const origSummaryVals = origSummaryRange.getValues();
+    // ② 元の集計表を calendarEndRowIdx から1行のズレもなく取得する
+    const origSummaryVals = fullValues.slice(calendarEndRowIdx);
     
     const appendStartRow = sheet.getLastRow() + 1;
-    sheet.getRange(appendStartRow, 1).setValue("実績集計区切り").setFontColor("white").setBackground("black");
+    sheet.getRange(appendStartRow, dateColIdx + 1).setValue("実績集計区切り").setFontColor("white").setBackground("black");
     sheet.getRange(appendStartRow, 1, 1, lastCol).setBackground("black");
 
     const newSummaryStart = appendStartRow + 1;
@@ -309,15 +428,17 @@ function updateAttendanceActuals() {
     const newSummaryRichTexts = []; 
     const newSummaryBackgrounds = []; 
 
+    const emptyRichCell = SpreadsheetApp.newRichTextValue().setText("").build();
+
     for (let sr = 0; sr < origSummaryVals.length; sr++) {
-      let rawLabel = origSummaryVals[sr][0];
+      let rawLabel = origSummaryVals[sr][dateColIdx];
       if (!rawLabel) continue;
-      let rowLabel = (rawLabel instanceof Date) ? `${rawLabel.getFullYear()}年${rawLabel.getMonth() + 1}月` : String(rawLabel);
+      let rowLabel = (rawLabel instanceof Date) ? `${rawLabel.getFullYear()}年${rawLabel.getMonth() + 1}月` : String(rawLabel).trim();
 
       let isMonthRow = rowLabel.match(/\d{4}年\d{1,2}月/);
       if (isMonthRow) {
         let isAllZeroOrEmpty = true;
-        for (let c = 1; c < lastCol; c++) {
+        for (let c = firstDocColIdx; c < lastCol; c++) {
           if (!cleanHeaders[c]) continue;
           const origVal = String(origSummaryVals[sr][c] || "").replace(/\s/g, "");
           if (origVal !== "" && origVal !== "0h(0日)" && origVal !== "0h(0.0日)" && origVal !== "0" && origVal !== "-") {
@@ -328,20 +449,19 @@ function updateAttendanceActuals() {
         if (isAllZeroOrEmpty) continue; 
       }
 
-      const newRowVals = [rowLabel];
-      const newRowRich = [SpreadsheetApp.newRichTextValue().setText(rowLabel).build()];
-      const newRowBgs = ["#f3f3f3"]; 
+      const newRowVals = new Array(lastCol).fill("");
+      const newRowRich = new Array(lastCol).fill(emptyRichCell);
+      const newRowBgs = new Array(lastCol).fill(null);
 
-      for (let c = 1; c < lastCol; c++) {
+      newRowVals[dateColIdx] = rowLabel;
+      newRowRich[dateColIdx] = SpreadsheetApp.newRichTextValue().setText(rowLabel).build();
+      for (let i = 0; i < firstDocColIdx; i++) newRowBgs[i] = "#f3f3f3";
+
+      for (let c = firstDocColIdx; c < lastCol; c++) {
         const docNameClean = cleanHeaders[c];
         const origVal = String(origSummaryVals[sr][c] || "");
         
-        if (!docNameClean) {
-          newRowVals.push("");
-          newRowRich.push(SpreadsheetApp.newRichTextValue().setText("").build());
-          newRowBgs.push(null);
-          continue;
-        }
+        if (!docNameClean) continue;
 
         const diffs = summaryDiffs[docNameClean] || { annual: { absH: 0, absD: 0, subH: 0, subD: 0, paid: 0 }, months: {} };
         let baseText = origVal;
@@ -350,11 +470,11 @@ function updateAttendanceActuals() {
         let isBlue = false;
 
         let calcObj = null;
-        if (rowLabel.match(/\d{4}年\d{1,2}月/)) calcObj = diffs.months[rowLabel];
+        if (isMonthRow) calcObj = diffs.months[rowLabel];
         else if (rowLabel.includes("年間労働時間") || rowLabel.includes("年間勤務日数")) calcObj = diffs.annual;
 
         if (calcObj && (calcObj.absH > 0 || calcObj.subH > 0)) {
-          let netH = calcObj.subH - calcObj.absH;
+          let netH = parseFloat((calcObj.subH - calcObj.absH).toFixed(2));
           let netD = calcObj.absD - calcObj.subD; 
           
           if (netH < 0) {
@@ -370,7 +490,7 @@ function updateAttendanceActuals() {
         }
         
         let fullText = baseText + suffixText;
-        newRowVals.push(fullText);
+        newRowVals[c] = fullText;
 
         const richBuilder = SpreadsheetApp.newRichTextValue().setText(fullText);
         if (suffixText !== "") {
@@ -379,36 +499,37 @@ function updateAttendanceActuals() {
           let color = isRed ? "red" : (isBlue ? "blue" : "green");
           richBuilder.setTextStyle(startIdx, endIdx, SpreadsheetApp.newTextStyle().setForegroundColor(color).build());
         }
-        newRowRich.push(richBuilder.build());
-        newRowBgs.push(null); 
+        newRowRich[c] = richBuilder.build();
       }
       newSummaryVals.push(newRowVals);
       newSummaryRichTexts.push(newRowRich);
       newSummaryBackgrounds.push(newRowBgs);
     }
 
+    const origDaysRow = origSummaryVals.find(row => String(row[dateColIdx]).includes("年間勤務日数"));
+
     const extraLabels = ["年間欠勤数", "有給取得日数", "勤怠遵守率"];
     extraLabels.forEach(label => {
-      const newRowVals = [label];
-      const newRowRich = [SpreadsheetApp.newRichTextValue().setText(label).build()];
-      const newRowBgs = ["#f3f3f3"];
+      const newRowVals = new Array(lastCol).fill("");
+      const newRowRich = new Array(lastCol).fill(emptyRichCell);
+      const newRowBgs = new Array(lastCol).fill(null);
 
-      for (let c = 1; c < lastCol; c++) {
+      newRowVals[dateColIdx] = label;
+      newRowRich[dateColIdx] = SpreadsheetApp.newRichTextValue().setText(label).build();
+      for (let i = 0; i < firstDocColIdx; i++) newRowBgs[i] = "#f3f3f3";
+
+      for (let c = firstDocColIdx; c < lastCol; c++) {
         const docNameClean = cleanHeaders[c];
-        if (!docNameClean) {
-          newRowVals.push("");
-          newRowRich.push(SpreadsheetApp.newRichTextValue().setText("").build());
-          newRowBgs.push(null);
-          continue;
-        }
+        if (!docNameClean) continue;
 
         const diffs = summaryDiffs[docNameClean] || { annual: { absH: 0, absD: 0, subH: 0, subD: 0, paid: 0 }, months: {} };
         let valText = "";
         let cellBg = null;
 
         let origDays = 0;
-        const origDaysRow = origSummaryVals.find(row => String(row[0]).includes("年間勤務日数"));
-        if (origDaysRow) origDays = parseFloat(String(origDaysRow[c]).replace(/[^\d.]/g, "")) || 0;
+        if (origDaysRow && origDaysRow[c] !== undefined) {
+          origDays = parseFloat(String(origDaysRow[c]).replace(/[^\d.]/g, "")) || 0;
+        }
         
         if (origDays > 0) {
           let netAbsD = Math.max(0, diffs.annual.absD - diffs.annual.subD);
@@ -423,22 +544,24 @@ function updateAttendanceActuals() {
             if (rate < 100) cellBg = "#fce8e6"; 
           }
         }
-        newRowVals.push(valText);
-        newRowRich.push(SpreadsheetApp.newRichTextValue().setText(valText).build());
-        newRowBgs.push(cellBg);
+        newRowVals[c] = valText;
+        newRowRich[c] = SpreadsheetApp.newRichTextValue().setText(valText).build();
+        newRowBgs[c] = cellBg;
       }
       newSummaryVals.push(newRowVals);
       newSummaryRichTexts.push(newRowRich);
       newSummaryBackgrounds.push(newRowBgs);
     });
 
-    const targetRange = sheet.getRange(newSummaryStart, 1, newSummaryRichTexts.length, lastCol);
-    targetRange.setRichTextValues(newSummaryRichTexts);
-    targetRange.setBackgrounds(newSummaryBackgrounds);
-    targetRange.setFontColor("black");
-    targetRange.setFontWeight("normal");
-    
-    sheet.getRange(newSummaryStart, 1, newSummaryRichTexts.length, 1).setFontWeight("bold");
+    if (newSummaryRichTexts.length > 0) {
+      const targetRange = sheet.getRange(newSummaryStart, 1, newSummaryRichTexts.length, lastCol);
+      targetRange.setRichTextValues(newSummaryRichTexts);
+      targetRange.setBackgrounds(newSummaryBackgrounds);
+      targetRange.setFontColor("black");
+      targetRange.setFontWeight("normal");
+      
+      sheet.getRange(newSummaryStart, dateColIdx + 1, newSummaryRichTexts.length, 1).setFontWeight("bold");
+    }
 
     console.log(`-> シート「${sheet.getName()}」の処理完了`);
   });
